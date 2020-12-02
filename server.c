@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
@@ -14,10 +15,10 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
-#include "util.h"
-#include "common.h"
+#include <netinet/tcp.h>
 #define IO_BUFSIZE 8192
 #define	MAXLINE	 8192
+#define MSGLEN 1000
 
 typedef struct {
     int io_fd;                /* descriptor for this internal buf */
@@ -27,8 +28,10 @@ typedef struct {
 } io_t;
 
 pthread_mutex_t messageLock;
-char message[200]= "";
+char message[MSGLEN] = "";
 
+
+//Read function that accounts for specific cases
 static ssize_t io_read(io_t *p, char *usrbuf, size_t n)
 {
     int cnt;
@@ -55,6 +58,7 @@ static ssize_t io_read(io_t *p, char *usrbuf, size_t n)
     return cnt;
 }
 
+//Wrapper function that reads a line
 ssize_t io_readline(io_t *p, void *usrbuf, size_t maxlen) 
 {
     int n, rc;
@@ -77,6 +81,7 @@ ssize_t io_readline(io_t *p, void *usrbuf, size_t maxlen)
     return n;
 }
 
+//init our io object
 void io_readinit(io_t *p, int fd) 
 {
     p->io_fd = fd;  
@@ -101,37 +106,33 @@ void *clientServiceThread(void *args){
     char *rest_of_request;          /* Beginning of second HTTP request header line */
     int request_len;                /* Total size of HTTP request */
     int i, n;                       /* General index and counting variables */
-    int realloc_factor;             /* Used to increase size of request buffer if necessary */  
 
     char hostname[MAXLINE];         /* Hostname extracted from request URI */
     char pathname[MAXLINE];         /* Content pathname extracted from request URI */
     int serverport;                 /* Port number extracted from request URI (default 80) */
     char log_entry[MAXLINE];        /* Formatted log entry */
-    int error = 0;
     io_t io;                      /* buffer*/
     char buf[MAXLINE];              /* General I/O buffer */
     request = (char *)malloc(MAXLINE);
     request[0] = '\0';
-    realloc_factor = 2;
     request_len = 0;
     io_readinit(&io, connfd);
     while (1) {
         if ((n = io_readline(&io, buf, MAXLINE)) <= 0) {
-            error = 1;	//Used to fix a bug
             printf("process_request: client issued a bad request (1).\n");
             close(connfd);
             free(request);
                 break;
         }
 
-        /* If not enough room in request buffer, make more room */
+        /* If out of space, double the buffer */
         if (request_len + n + 1 > MAXLINE)
-            realloc(request, MAXLINE*realloc_factor++);
+            realloc(request, sizeof(request)*2);
 
         strcat(request, buf);
         request_len += n;
 
-        /* An HTTP requests is always terminated by a blank line */
+        /* An HTTP requests are always finsih with blank line */
         if (strcmp(buf, "\r\n") == 0)
             break;
     }
@@ -139,16 +140,33 @@ void *clientServiceThread(void *args){
     /*Check if GET Request 
     Request will return the current message */
     if (strncmp(request, "GET ", strlen("GET ")) == 0) {
-        write(connfd,"HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 12\n\n",strlen("HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 12\n\n"));
-        write(connfd,message, strlen(message));
-        fflush(connfd);
+        int len = strlen(message);
+        char header[60 + len];
+        sprintf(header,"HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: %d\n\n",len);
+        write(connfd,header,strlen(header));
+        write(connfd,message, len);
         close(connfd);
         free(request);
     }
     /* Check if POST Request
     Request will update the current message */
     else if (strncmp(request, "POST ", strlen("POST ")) == 0) {
-        printf("CONN");
+        char msgbuf[MSGLEN];
+        int msgLen = 0;
+        message[0] = '\0';
+        while(true){
+            //Check if msg is too long, if so truncate
+            n = io_readline(&io, msgbuf, MSGLEN);
+            if(n == 0)
+                break;
+            if(msgLen + n > 200){
+                n = 200 - msgLen - 1;
+                strncat(request, buf,n);
+                break;
+            }
+            strcat(request, buf);
+            msgLen += n;
+        }
         close(connfd);
         free(request);
     }
@@ -161,20 +179,20 @@ void *clientServiceThread(void *args){
 int main(int argc, char** argv){
 
     if (argc != 2){
-        errprint("usage: ./motdServer port\n");
+        printf("usage: ./motdServer port\n");
         return 1;
     }
 
     int port = atoi(argv[1]);
     if (port < 1024){
-        errprint("invalid port, choose one over 1024\n");
+        printf("invalid port, choose one over 1024\n");
         return 1;
     }
 
     struct sockaddr_in serv_addr;
     int listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenfd < 0){
-        errprint("socket creation failed\n");
+        printf("socket creation failed\n");
         return 1;
     }
 
@@ -188,12 +206,12 @@ int main(int argc, char** argv){
     serv_addr.sin_port = htons(port);
 
     if (bind(listenfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0){
-        errprint("failed to bind to port %d\n", port);
+        printf("failed to bind to port %d\n", port);
         return 1;
     }
 
     if (listen(listenfd, 10) < 0){
-        errprint("failed to listen\n");
+        printf("failed to listen\n");
         return 1;
     }
 
@@ -204,7 +222,7 @@ int main(int argc, char** argv){
         if (connfd == -1 && errno == EWOULDBLOCK){
             usleep(250000);
         } else if (connfd == -1){
-            errprint("accept failed\n");
+            printf("accept failed\n");
         } else {
             int *fdPtr = (int *)malloc(sizeof(int));
             *fdPtr = connfd;

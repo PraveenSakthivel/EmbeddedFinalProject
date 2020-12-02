@@ -1,8 +1,8 @@
 CC = gcc
-CFLAGS = -pthread
+CFLAGS = -pthread -g
 #CFLAGS += -DDEBUG -Wall -Werror -g
 #CFLAGS += -fsanitize=address -g
-CFLAGS += -O3
+CFLAGS += -O0
 SERVERDEPS =
 CLIENTDEPS =
 ASSTNAME = Asst3
