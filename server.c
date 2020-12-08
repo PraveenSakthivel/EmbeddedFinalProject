@@ -19,6 +19,7 @@
 #define IO_BUFSIZE 8192
 #define	MAXLINE	 8192
 #define MSGLEN 1000
+#define dprint(...) fprintf(stderr, __VA_ARGS__)
 
 typedef struct {
     int io_fd;                /* descriptor for this internal buf */
@@ -27,7 +28,7 @@ typedef struct {
     char io_buf[IO_BUFSIZE]; /* internal buffer */
 } io_t;
 
-pthread_mutex_t messageLock;
+pthread_rwlock_t messageLock = PTHREAD_RWLOCK_INITIALIZER;
 char message[MSGLEN] = "";
 
 
@@ -39,11 +40,7 @@ static ssize_t io_read(io_t *p, char *usrbuf, size_t n)
     while (p->io_cnt <= 0) {  /* refill if buf is empty */
 	p->io_cnt = read(p->io_fd, p->io_buf, 
 			   sizeof(p->io_buf));
-	if (p->io_cnt < 0) {
-	    if (errno != EINTR) /* interrupted by sig handler return */
-		return -1;
-	}
-	else if (p->io_cnt == 0)  /* EOF */
+	if (p->io_cnt <= 0)  /* EOF */
 	    return 0;
 	else 
 	    p->io_bufptr = p->io_buf; /* reset buffer ptr */
@@ -69,13 +66,12 @@ ssize_t io_readline(io_t *p, void *usrbuf, size_t maxlen)
 	    *bufp++ = c;
 	    if (c == '\n')
 		break;
-	} else if (rc == 0) {
+	} else{
 	    if (n == 1)
-		return 0; /* EOF, no data read */
+		    return 0; /* EOF, no data read */
 	    else
-		break;    /* EOF, some data was read */
-	} else
-	    return -1;	  /* error */
+		    break;    /* EOF, some data was read */
+	}
     }
     *bufp = 0;
     return n;
@@ -103,14 +99,9 @@ void *clientServiceThread(void *args){
     printf("Connection established with %s\n", peerIP);
     
     char *request;                  /* HTTP request from client */
-    char *rest_of_request;          /* Beginning of second HTTP request header line */
     int request_len;                /* Total size of HTTP request */
     int i, n;                       /* General index and counting variables */
 
-    char hostname[MAXLINE];         /* Hostname extracted from request URI */
-    char pathname[MAXLINE];         /* Content pathname extracted from request URI */
-    int serverport;                 /* Port number extracted from request URI (default 80) */
-    char log_entry[MAXLINE];        /* Formatted log entry */
     io_t io;                      /* buffer*/
     char buf[MAXLINE];              /* General I/O buffer */
     request = (char *)malloc(MAXLINE);
@@ -140,34 +131,41 @@ void *clientServiceThread(void *args){
     /*Check if GET Request 
     Request will return the current message */
     if (strncmp(request, "GET ", strlen("GET ")) == 0) {
+        pthread_rwlock_rdlock(&messageLock);
         int len = strlen(message);
         char header[60 + len];
         sprintf(header,"HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: %d\n\n",len);
         write(connfd,header,strlen(header));
         write(connfd,message, len);
-        close(connfd);
+        pthread_rwlock_unlock(&messageLock);
         free(request);
     }
     /* Check if POST Request
     Request will update the current message */
     else if (strncmp(request, "POST ", strlen("POST ")) == 0) {
         char msgbuf[MSGLEN];
+        char tmp[MSGLEN];
         int msgLen = 0;
-        message[0] = '\0';
+        tmp[0] = '\0';
         while(true){
-            //Check if msg is too long, if so truncate
             n = io_readline(&io, msgbuf, MSGLEN);
-            if(n == 0)
-                break;
-            if(msgLen + n > 200){
-                n = 200 - msgLen - 1;
-                strncat(request, buf,n);
+            if(n <= 0){
                 break;
             }
-            strcat(request, buf);
+            //Check if msg is too long, if so truncate
+            else if(msgLen + n > MSGLEN){
+                n = MSGLEN - msgLen;
+                
+                strncat(tmp, msgbuf,n);
+                break;
+            }
+            strncat(tmp, msgbuf, n);
             msgLen += n;
         }
-        close(connfd);
+        pthread_rwlock_wrlock(&messageLock);
+        memcpy(message,tmp,MSGLEN);
+        pthread_rwlock_unlock(&messageLock);
+        write(connfd,"HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 15\n\nMessage Updated", strlen("HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 15\n\nMessage Updated"));
         free(request);
     }
 
