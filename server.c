@@ -16,6 +16,8 @@
 #include <errno.h>
 #include <pthread.h>
 #include <netinet/tcp.h>
+#include "PmodOLED.h"
+#include "xparameters.h"
 #define IO_BUFSIZE 8192
 #define	MAXLINE	 8192
 #define MSGLEN 1000
@@ -30,6 +32,13 @@ typedef struct {
 
 pthread_rwlock_t messageLock = PTHREAD_RWLOCK_INITIALIZER;
 char message[MSGLEN] = "";
+
+PmodOLED myDevice;
+
+const u8 orientation = 0x1; // Set up for Normal PmodOLED(false) vs normal
+                            // Onboard OLED(true)
+const u8 invert = 0x0; // true = whitebackground/black letters
+                       // false = black background /white letters
 
 
 //Read function that accounts for specific cases
@@ -163,7 +172,10 @@ void *clientServiceThread(void *args){
             msgLen += n;
         }
         pthread_rwlock_wrlock(&messageLock);
+        OLED_Clear(&myDevice);
         memcpy(message,tmp,MSGLEN);
+        OLED_Clear(&myDevice);
+        OLED_PutString(&myDevice, message);
         pthread_rwlock_unlock(&messageLock);
         write(connfd,"HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 15\n\nMessage Updated", strlen("HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 15\n\nMessage Updated"));
         free(request);
@@ -194,6 +206,12 @@ int main(int argc, char** argv){
         return 1;
     }
 
+
+    OLED_Begin(&myDevice, XPAR_PMODOLED_0_AXI_LITE_GPIO_BASEADDR,
+         XPAR_PMODOLED_0_AXI_LITE_SPI_BASEADDR, orientation, invert);
+
+    OLED_Clear(&myDevice);
+    
     int flags = fcntl(listenfd, F_GETFL);
     fcntl(listenfd, F_SETFL, flags | O_NONBLOCK);
 
